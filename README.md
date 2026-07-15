@@ -146,7 +146,9 @@ Each dashboard snapshot emitted by the observer is appended as JSON Lines under
 `<outdir>/pipeline_info/progress.jsonl`. This is a history of dashboard views,
 not a complete task-event log: unchanged frames may be omitted and several
 lifecycle changes may be represented by one projection. The file is independent
-of terminal animation and is suitable for post-run status inspection.
+of terminal animation and is suitable for post-run status inspection. Each
+record keeps the focused live stage in `stage` and the complete ordered stage
+ledger in `stages`, so fast parallel branches remain visible after completion.
 
 Local paths and `file://` outputs are appended directly. Cloud output URIs such
 as `s3://` and `gs://` are resolved through Nextflow's filesystem providers.
