@@ -3,6 +3,7 @@ package standardmodelbio.plugin.io
 import groovy.transform.CompileStatic
 import nextflow.file.FileHelper
 
+import java.net.URI
 import java.nio.file.Path
 import java.util.function.Function
 
@@ -29,6 +30,11 @@ class AuditPathResolver {
             return configuredOutdir as Path
         }
         String value = configuredOutdir?.toString()?.trim()
-        return value ? pathParser.apply(value) : fallback
+        if (!value) {
+            return fallback
+        }
+        return value.regionMatches(true, 0, 'file:', 0, 'file:'.length())
+            ? Path.of(URI.create(value))
+            : pathParser.apply(value)
     }
 }
