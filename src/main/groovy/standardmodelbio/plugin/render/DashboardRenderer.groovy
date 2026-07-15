@@ -33,11 +33,16 @@ class DashboardRenderer {
         StageDisplay stage = view.currentStage()
         List<String> lines = []
         lines << fit("  nf-seqlab  ${view.runName ?: view.runId}", capabilities.width)
-        lines << fit(stageStrip(view.stages, capabilities.unicode), capabilities.width)
+        if (view.stages.size() > 1) {
+            lines << fit(stageStrip(view.stages, capabilities.unicode), capabilities.width)
+        }
         if (stage != null) {
             String count = "${stage.completedFiles}/${stage.expectedFiles} files  ${oneDecimal(stage.percent)}%"
-            int barWidth = Math.max(10, Math.min(36, capabilities.width - stage.label.size() - count.size() - 8))
-            lines << fit("${stage.label.padRight(18)} ${segmentedBar(stage.completedFiles, stage.expectedFiles, barWidth, capabilities.unicode)}  ${count}", capabilities.width)
+            int barWidth = Math.max(10, Math.min(
+                36,
+                capabilities.width - TerminalCells.width(stage.label) - TerminalCells.width(count) - 8,
+            ))
+            lines << fit("${TerminalCells.padRight(stage.label, 18)} ${segmentedBar(stage.completedFiles, stage.expectedFiles, barWidth, capabilities.unicode)}  ${count}", capabilities.width)
         }
         int fileRows = Math.min(view.activeFiles.size(), 4)
         for (int index = 0; index < fileRows; index++) {
@@ -58,8 +63,8 @@ class DashboardRenderer {
         List<String> lines = [fit("nf-seqlab  ${view.runName ?: view.runId}", capabilities.width)]
         if (stage != null) {
             String suffix = "${stage.completedFiles}/${stage.expectedFiles}  ${oneDecimal(stage.percent)}%"
-            int labelWidth = Math.max(8, capabilities.width - suffix.size() - 2)
-            lines << "${middleElide(stage.label, labelWidth).padRight(labelWidth)}  ${suffix}".toString()
+            int labelWidth = Math.max(8, capabilities.width - TerminalCells.width(suffix) - 2)
+            lines << "${TerminalCells.padRight(middleElide(stage.label, labelWidth), labelWidth)}  ${suffix}".toString()
         }
         if (!view.activeFiles.isEmpty()) {
             lines << fileLine(view.activeFiles.first(), capabilities.width, capabilities.unicode, frame)
@@ -80,7 +85,7 @@ class DashboardRenderer {
         if (!view.activeFiles.isEmpty()) {
             FileDisplay file = view.activeFiles.first()
             String progress = file.percent == null ? spinner(frame, false) : "${oneDecimal(file.percent)}%"
-            int idWidth = Math.max(4, capabilities.width - progress.size() - 1)
+            int idWidth = Math.max(4, capabilities.width - TerminalCells.width(progress) - 1)
             lines << fit("${middleElide(file.fileId, idWidth)} ${progress}", capabilities.width)
         }
         return lines.join('\n')
@@ -175,25 +180,20 @@ class DashboardRenderer {
         int barWidth = Math.max(6, Math.min(24, width.intdiv(4)))
         String bar = continuousBar(file.percent, barWidth, unicode, frame)
         String phase = file.phase ?: file.state
-        int reserved = bar.size() + percent.size() + phase.size() + 6
+        int reserved = TerminalCells.width(bar) +
+            TerminalCells.width(percent) +
+            TerminalCells.width(phase) +
+            6
         int idWidth = Math.max(4, width - reserved)
-        return fit("${middleElide(file.fileId, idWidth).padRight(idWidth)}  ${bar}  ${percent}  ${phase}", width)
+        return fit("${TerminalCells.padRight(middleElide(file.fileId, idWidth), idWidth)}  ${bar}  ${percent}  ${phase}", width)
     }
 
     private static String middleElide(String value, int width) {
-        if (value == null || value.size() <= width) {
-            return value ?: ''
-        }
-        if (width <= 3) {
-            return value.take(width)
-        }
-        int left = (width - 3).intdiv(2)
-        int right = width - 3 - left
-        return value.take(left) + '...' + value.takeRight(right)
+        return TerminalCells.middleElide(value, width)
     }
 
     private static String fit(String value, int width) {
-        return value.size() <= width ? value : value.take(width)
+        return TerminalCells.truncate(value, width)
     }
 
     private static String oneDecimal(double value) {

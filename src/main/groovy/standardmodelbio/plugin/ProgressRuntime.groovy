@@ -1,6 +1,7 @@
 package standardmodelbio.plugin
 
 import groovy.transform.CompileStatic
+import standardmodelbio.plugin.model.ProgressProjection
 import standardmodelbio.plugin.model.ProgressState
 import standardmodelbio.plugin.render.DashboardView
 import standardmodelbio.plugin.render.FileDisplay
@@ -49,39 +50,31 @@ class ProgressRuntime {
             state.registerStage(
                 required(definition, 'id'),
                 required(definition, 'label'),
+                optionalFileIds(definition['file_ids']),
             )
         }
         processDefinitions.each { Map<String, ?> definition ->
             state.mapProcess(
                 required(definition, 'process'),
                 required(definition, 'stage'),
-                booleanValue(definition['completion_boundary']),
+                definition['completion_boundary'],
             )
         }
     }
 
     DashboardView dashboard(int maximumActiveFiles) {
-        List<StageDisplay> stageDisplays = state.stageIds().collect { String stageId ->
-            def stage = state.stage(stageId)
+        ProgressProjection projection = state.project(maximumActiveFiles)
+        List<StageDisplay> stageDisplays = projection.stages.collect { stage ->
             return new StageDisplay(
                 stage.stageId,
                 stage.label,
-                state.stageStatus(stageId),
+                stage.state,
                 stage.completedFiles,
                 stage.expectedFiles,
                 stage.percent,
             )
         }
-        StageDisplay current = stageDisplays.find { StageDisplay stage -> stage.state in ['running', 'failed'] }
-        if (current == null) {
-            current = stageDisplays.find { StageDisplay stage -> stage.state == 'queued' }
-        }
-        if (current == null && !stageDisplays.isEmpty()) {
-            current = stageDisplays.last()
-        }
-        List<FileDisplay> files = current == null
-            ? []
-            : state.activeFiles(current.id, maximumActiveFiles).collect { active ->
+        List<FileDisplay> files = projection.activeFiles.collect { active ->
                 new FileDisplay(
                     active.fileId,
                     active.phase,
@@ -96,9 +89,9 @@ class ProgressRuntime {
             runId,
             runName,
             stageDisplays,
-            current?.id,
+            projection.currentStageId,
             files,
-            state.errorCount(),
+            projection.errorCount,
         )
     }
 
@@ -114,7 +107,14 @@ class ProgressRuntime {
         return value == null ? '' : value.toString()
     }
 
-    private static boolean booleanValue(Object value) {
-        return value != null && value.toString().toBoolean()
+    private static Collection<String> optionalFileIds(Object value) {
+        if (value == null) {
+            return null
+        }
+        if (!(value instanceof Collection)) {
+            throw new IllegalArgumentException("Progress stage 'file_ids' must be a collection")
+        }
+        return (value as Collection).collect { Object fileId -> stringValue(fileId) }
     }
+
 }

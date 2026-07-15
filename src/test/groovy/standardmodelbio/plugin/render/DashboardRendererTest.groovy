@@ -45,6 +45,24 @@ class DashboardRendererTest extends Specification {
         output.readLines().every { it.size() <= 40 }
     }
 
+    def 'full layout renders a single stage label only once'() {
+        given:
+        def singleStage = new DashboardView(
+            'single-run',
+            'Single run',
+            [new StageDisplay('exact', 'Exact progress', 'completed', 1, 1, 100d)],
+            'exact',
+            [],
+            0,
+        )
+
+        when:
+        String output = renderer.render(singleStage, capabilities(RenderMode.FULL, 80, true), 0)
+
+        then:
+        output.readLines().count { it.contains('Exact progress') } == 1
+    }
+
     def 'plain mode emits one immutable ANSI-free status line'() {
         when:
         String output = renderer.render(view(), capabilities(RenderMode.PLAIN, 120, false), 0)
@@ -88,6 +106,50 @@ class DashboardRendererTest extends Specification {
         width << [40, 59, 60, 80, 99, 100, 120, 200]
     }
 
+    @Unroll
+    def 'wide Unicode layout stays within terminal cells on #platform'() {
+        given:
+        int width = mode == RenderMode.MINIMAL ? 40 : 60
+
+        when:
+        String output = renderer.render(wideView(), capabilities(mode, width, true), 4)
+
+        then:
+        output.readLines().each { String line ->
+            assert expectedCellWidth(line) <= width:
+                "${expectedCellWidth(line)} cells exceed ${width}: ${line}"
+        }
+        output.readLines().every { String line -> hasValidSurrogates(line) }
+
+        where:
+        platform  | mode
+        'Linux'   | RenderMode.COMPACT
+        'macOS'   | RenderMode.COMPACT
+        'Windows' | RenderMode.MINIMAL
+    }
+
+    def 'cell truncation never splits an emoji surrogate pair'() {
+        given:
+        DashboardView surrogateBoundary = new DashboardView(
+            'unicode-run',
+            ('a' * 48) + '\uD83D\uDE00tail',
+            [new StageDisplay('exact', 'Exact progress', 'running', 0, 1, 0d)],
+            'exact',
+            [],
+            0,
+        )
+
+        when:
+        String firstLine = renderer
+            .render(surrogateBoundary, capabilities(RenderMode.COMPACT, 60, true), 0)
+            .readLines()
+            .first()
+
+        then:
+        expectedCellWidth(firstLine) <= 60
+        hasValidSurrogates(firstLine)
+    }
+
     private static DashboardView view() {
         return new DashboardView(
             'aou-v8',
@@ -111,6 +173,69 @@ class DashboardRendererTest extends Specification {
             ],
             0,
         )
+    }
+
+    private static DashboardView wideView() {
+        return new DashboardView(
+            'unicode-run',
+            '分析\uD83D\uDE00' * 30,
+            [new StageDisplay('exact', '解析e\u0301\uD83D\uDE00' * 12, 'running', 0, 1, 0d)],
+            'exact',
+            [new FileDisplay(
+                '样本e\u0301\uD83D\uDE00' * 20,
+                '阶段\uD83D\uDE00',
+                'running',
+                1L,
+                10L,
+                'records',
+                10d,
+            )],
+            0,
+        )
+    }
+
+    private static int expectedCellWidth(String value) {
+        int width = 0
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset)
+            int type = Character.getType(codePoint)
+            if (type != Character.NON_SPACING_MARK &&
+                type != Character.COMBINING_SPACING_MARK &&
+                type != Character.ENCLOSING_MARK) {
+                width += isExpectedWide(codePoint) ? 2 : 1
+            }
+            offset += Character.charCount(codePoint)
+        }
+        return width
+    }
+
+    private static boolean isExpectedWide(int codePoint) {
+        return codePoint >= 0x1100 && (
+            codePoint <= 0x115F ||
+                codePoint in 0x2E80..0xA4CF ||
+                codePoint in 0xAC00..0xD7A3 ||
+                codePoint in 0xF900..0xFAFF ||
+                codePoint in 0xFE10..0xFE6F ||
+                codePoint in 0xFF00..0xFF60 ||
+                codePoint in 0xFFE0..0xFFE6 ||
+                codePoint in 0x1F300..0x1FAFF
+        )
+    }
+
+    private static boolean hasValidSurrogates(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index)
+            if (Character.isHighSurrogate(current)) {
+                if (index + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(index + 1))) {
+                    return false
+                }
+                index++
+            }
+            else if (Character.isLowSurrogate(current)) {
+                return false
+            }
+        }
+        return true
     }
 
     private static TerminalCapabilities capabilities(

@@ -8,11 +8,13 @@ import nextflow.trace.AnsiLogObserver
 import nextflow.trace.TraceRecord
 import nextflow.trace.WorkflowStats
 import nextflow.trace.event.TaskEvent
+import org.fusesource.jansi.AnsiConsole
 import standardmodelbio.plugin.io.ProgressAuditWriter
 import standardmodelbio.plugin.io.ProgressSnapshotReader
 import standardmodelbio.plugin.model.ProgressSnapshot
 import standardmodelbio.plugin.model.TaskIdentity
 import standardmodelbio.plugin.render.DashboardRenderer
+import standardmodelbio.plugin.render.DashboardView
 import standardmodelbio.plugin.render.RenderMode
 import standardmodelbio.plugin.render.TerminalCapabilities
 
@@ -32,6 +34,8 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     private final DashboardRenderer dashboardRenderer = new DashboardRenderer()
     private final Map<String, TrackedTask> activeTasks = new ConcurrentHashMap<>()
     private final Set<String> warnedSnapshots = ConcurrentHashMap.newKeySet()
+    private final Map<String, String> terminalEnvironmentOverride
+    private final Object lifecycleLock = new Object()
 
     private Session session
     private TerminalCapabilities capabilities = new TerminalCapabilities(
@@ -50,14 +54,27 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     private long frame
     private String lastPlainFrame
     private int snapshotWarnings
+    private int ownedDashboardLines
+    private boolean closing
 
     SeqlabProgressObserver(ProgressRuntime runtime) {
-        this(runtime, false)
+        this(runtime, false, null)
     }
 
     SeqlabProgressObserver(ProgressRuntime runtime, boolean ansiClaimed) {
+        this(runtime, ansiClaimed, null)
+    }
+
+    SeqlabProgressObserver(
+        ProgressRuntime runtime,
+        boolean ansiClaimed,
+        Map<String, String> terminalEnvironmentOverride
+    ) {
         this.runtime = runtime
         this.ansiClaimed = ansiClaimed
+        this.terminalEnvironmentOverride = terminalEnvironmentOverride == null
+            ? null
+            : new LinkedHashMap<>(terminalEnvironmentOverride)
     }
 
     boolean getAnsiClaimed() {
@@ -73,7 +90,9 @@ class SeqlabProgressObserver extends AnsiLogObserver {
         this.session = session
         Map params = session.config?.params as Map ?: Collections.emptyMap()
         requestedMode = (params['progress_mode'] ?: 'auto').toString()
-        terminalEnvironment = new LinkedHashMap<>(System.getenv())
+        terminalEnvironment = terminalEnvironmentOverride == null
+            ? new LinkedHashMap<>(System.getenv())
+            : new LinkedHashMap<>(terminalEnvironmentOverride)
         int width = integerValue(
             terminalEnvironment['TERMINAL_WIDTH'],
             integerValue(terminalEnvironment['COLUMNS'], 120),
@@ -90,7 +109,7 @@ class SeqlabProgressObserver extends AnsiLogObserver {
 
         if (capabilities.cursorAddressing &&
             (!ansiClaimed || !ConsoleSlot.get(session)?.is(this) || !AnsiLineAccounting.compatible())) {
-            capabilities = new TerminalCapabilities(RenderMode.PLAIN, width, false, unicode, false)
+            capabilities = new TerminalCapabilities(RenderMode.PLAIN, width, false, terminalUnicode, false)
         }
 
         Path auditRoot = resolveAuditRoot(params['outdir'], session.outputDir)
@@ -137,96 +156,208 @@ class SeqlabProgressObserver extends AnsiLogObserver {
 
     @Override
     void onTaskPending(TaskEvent event) {
-        transition(event, 'pending')
+        synchronized (lifecycleLock) {
+            if (!closing) {
+                transition(event, 'pending')
+            }
+        }
     }
 
     @Override
-    synchronized void onTaskSubmit(TaskEvent event) {
-        if (capabilities.cursorAddressing) {
-            super.onTaskSubmit(event)
+    void onTaskSubmit(TaskEvent event) {
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return
+            }
+            if (capabilities.cursorAddressing) {
+                super.onTaskSubmit(event)
+            }
+            transition(event, 'submitted')
         }
-        transition(event, 'submitted')
     }
 
     @Override
     void onTaskStart(TaskEvent event) {
-        transition(event, 'running')
+        synchronized (lifecycleLock) {
+            if (!closing) {
+                transition(event, 'running')
+            }
+        }
     }
 
     @Override
     void onTaskComplete(TaskEvent event) {
-        TaskIdentity identity = identity(event)
-        if (identity == null) {
-            return
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return
+            }
+            TaskIdentity identity = identity(event)
+            if (identity == null) {
+                return
+            }
+            pollTrackedSnapshot(identity)
+            if (successful(event.trace)) {
+                runtime.state.taskCompleted(identity, false)
+            }
+            else {
+                runtime.state.taskFailed(identity, failureMessage(event.trace))
+            }
+            removeActiveTask(identity)
+            recordAndRender()
         }
-        runtime.state.taskCompleted(identity, false)
-        activeTasks.remove(identity.taskId)
-        recordAndRender()
     }
 
     @Override
     void onTaskCached(TaskEvent event) {
-        TaskIdentity identity = identity(event)
-        if (identity == null) {
-            return
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return
+            }
+            TaskIdentity identity = identity(event)
+            if (identity == null) {
+                return
+            }
+            pollTrackedSnapshot(identity)
+            runtime.state.taskCompleted(identity, true)
+            removeActiveTask(identity)
+            recordAndRender()
         }
-        runtime.state.taskCompleted(identity, true)
-        activeTasks.remove(identity.taskId)
-        recordAndRender()
     }
 
     @Override
     void onFlowError(TaskEvent event) {
-        TaskIdentity identity = identity(event)
-        if (identity != null && activeTasks.containsKey(identity.taskId)) {
-            runtime.state.taskFailed(identity, 'Nextflow task failed')
-            activeTasks.remove(identity.taskId)
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return
+            }
+            TaskIdentity identity = identity(event)
+            if (identity != null) {
+                pollTrackedSnapshot(identity)
+                runtime.state.taskFailed(identity, failureMessage(event.trace))
+                removeActiveTask(identity)
+            }
+            recordAndRender()
         }
-        recordAndRender()
     }
 
     @Override
     void onFlowComplete() {
-        pollSnapshots()
-        recordAndRender()
-        poller?.shutdownNow()
-        if (capabilities.cursorAddressing) {
-            super.onFlowComplete()
+        synchronized (lifecycleLock) {
+            if (closing) {
+                return
+            }
+            closing = true
         }
-        auditWriter?.close()
-        if (session != null) {
-            DashboardClaims.remove(session)
-            ProgressRuntimes.remove(session)
+        stopPoller()
+        synchronized (lifecycleLock) {
+            try {
+                pollSnapshotsInternal()
+                recordAndRender()
+                if (capabilities.cursorAddressing) {
+                    super.onFlowComplete()
+                }
+            }
+            finally {
+                cleanupSafely('progress audit writer') {
+                    auditWriter?.close()
+                }
+                if (session != null) {
+                    if (ansiClaimed) {
+                        cleanupSafely('ANSI console slot') {
+                            ConsoleSlot.clearIfOwned(session, this)
+                        }
+                    }
+                    cleanupSafely('dashboard claim') {
+                        DashboardClaims.remove(session)
+                    }
+                    cleanupSafely('progress runtime') {
+                        ProgressRuntimes.remove(session)
+                    }
+                }
+            }
         }
     }
 
     void pollSnapshots() {
+        synchronized (lifecycleLock) {
+            if (!closing) {
+                pollSnapshotsInternal()
+            }
+        }
+    }
+
+    private void pollSnapshotsInternal() {
         boolean changed = false
         activeTasks.values().each { TrackedTask tracked ->
-            try {
-                ProgressSnapshot snapshot = snapshotReader.read(tracked.snapshotPath)
-                if (snapshot == null || snapshot.updatedAt == tracked.updatedAt) {
-                    return
-                }
-                runtime.state.applySnapshot(snapshot)
-                tracked.updatedAt = snapshot.updatedAt
-                changed = true
-            }
-            catch (Exception error) {
-                String warningKey = "${tracked.identity.taskId}:${tracked.identity.attempt}"
-                if (warnedSnapshots.add(warningKey)) {
-                    snapshotWarnings++
-                    log.warn "Ignoring invalid nf-seqlab progress snapshot for ${warningKey}: ${error.message}"
-                }
-            }
+            changed |= pollTrackedSnapshot(tracked)
         }
         if (changed) {
             recordAndRender()
         }
     }
 
+    private boolean pollTrackedSnapshot(TaskIdentity identity) {
+        TrackedTask tracked = activeTasks[identity.taskId]
+        return tracked != null && tracked.identity.attempt == identity.attempt
+            ? pollTrackedSnapshot(tracked)
+            : false
+    }
+
+    private boolean pollTrackedSnapshot(TrackedTask tracked) {
+        try {
+            ProgressSnapshot snapshot = snapshotReader.read(tracked.snapshotPath)
+            if (snapshot == null || snapshot == tracked.snapshot) {
+                return false
+            }
+            boolean applied = runtime.state.applySnapshot(snapshot)
+            tracked.snapshot = snapshot
+            return applied
+        }
+        catch (Exception error) {
+            String warningKey = "${tracked.identity.taskId}:${tracked.identity.attempt}"
+            if (warnedSnapshots.add(warningKey)) {
+                snapshotWarnings++
+                log.warn "Ignoring invalid nf-seqlab progress snapshot for ${warningKey}: ${error.message}"
+            }
+            return false
+        }
+    }
+
+    private void stopPoller() {
+        ScheduledExecutorService executor = poller
+        poller = null
+        if (executor == null) {
+            return
+        }
+        executor.shutdownNow()
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                log.warn 'Timed out waiting for nf-seqlab progress poller to stop'
+            }
+        }
+        catch (InterruptedException error) {
+            Thread.currentThread().interrupt()
+            log.warn 'Interrupted while waiting for nf-seqlab progress poller to stop'
+        }
+    }
+
+    private static void cleanupSafely(String resource, Closure<?> action) {
+        try {
+            action.call()
+        }
+        catch (Exception error) {
+            log.warn "Unable to release nf-seqlab ${resource}: ${error.message}"
+        }
+    }
+
     @Override
     synchronized protected void renderProgress(WorkflowStats stats) {
+        renderProjectedProgress(stats, runtime.dashboard(maximumActiveFiles))
+    }
+
+    private synchronized void renderProjectedProgress(WorkflowStats stats, DashboardView view) {
+        AnsiLineAccounting.eraseOwnedLines(AnsiConsole.out, ownedDashboardLines)
+        ownedDashboardLines = 0
         super.renderProgress(stats)
         if (!capabilities.cursorAddressing) {
             return
@@ -239,10 +370,11 @@ class SeqlabProgressObserver extends AnsiLogObserver {
             terminalEnvironment,
             terminalUnicode,
         )
-        String dashboard = dashboardRenderer.render(runtime.dashboard(maximumActiveFiles), capabilities, frame++)
+        String dashboard = dashboardRenderer.render(view, capabilities, frame++)
         if (dashboard) {
-            int rows = printAndCountLines(dashboard)
-            AnsiLineAccounting.addPrintedLines(this, rows)
+            printAndCountLines(dashboard)
+            ownedDashboardLines = AnsiLineAccounting.physicalLines(dashboard, width)
+            AnsiConsole.out.flush()
         }
     }
 
@@ -254,12 +386,26 @@ class SeqlabProgressObserver extends AnsiLogObserver {
         runtime.state.taskTransition(identity, state)
         Path workDir = event.handler?.task?.workDir
         if (workDir != null) {
+            activeTasks.entrySet().removeIf { Map.Entry<String, TrackedTask> entry ->
+                TaskIdentity tracked = entry.value.identity
+                tracked.attempt < identity.attempt &&
+                    tracked.process == identity.process &&
+                    tracked.fileId == identity.fileId &&
+                    tracked.parentFileId == identity.parentFileId
+            }
             activeTasks[identity.taskId] = new TrackedTask(
                 identity,
                 workDir.resolve('.nf-seqlab-progress.json'),
             )
         }
         recordAndRender()
+    }
+
+    private void removeActiveTask(TaskIdentity identity) {
+        TrackedTask tracked = activeTasks[identity.taskId]
+        if (tracked != null && tracked.identity.attempt == identity.attempt) {
+            activeTasks.remove(identity.taskId, tracked)
+        }
     }
 
     private TaskIdentity identity(TaskEvent event) {
@@ -277,19 +423,37 @@ class SeqlabProgressObserver extends AnsiLogObserver {
         }
         catch (Exception ignored) {
         }
-        String fileId = environment['NF_SEQLAB_PROGRESS_FILE_ID']
-        String parentFileId = environment['NF_SEQLAB_PROGRESS_PARENT_FILE_ID'] ?: fileId
+        Map metadata = Collections.emptyMap()
+        try {
+            Object value = task.context?.get('meta')
+            if (value instanceof Map) {
+                metadata = value as Map
+            }
+        }
+        catch (Exception ignored) {
+        }
+        String fileId = environment['NF_SEQLAB_PROGRESS_FILE_ID'] ?:
+            stringValue(metadata['file_id'] ?: metadata['id'])
+        String parentFileId = environment['NF_SEQLAB_PROGRESS_PARENT_FILE_ID'] ?:
+            stringValue(metadata['parent_file_id'] ?: metadata['parent_id']) ?:
+            fileId
         if (!fileId || !parentFileId) {
             return null
         }
         String process = stringValue(trace?.get('process')) ?: task.name
         process = process?.tokenize(':')?.last()
-        String taskId = environment['NF_SEQLAB_PROGRESS_TASK_ID'] ?: stringValue(trace?.get('task_id'))
+        String taskId = environment['NF_SEQLAB_PROGRESS_TASK_ID']
         if (!taskId && task.workDir != null) {
-            taskId = "${task.workDir.parent?.fileName}/${task.workDir.fileName}"
+            Path parent = task.workDir.parent
+            if (parent?.fileName != null && task.workDir.fileName != null) {
+                taskId = "${parent.fileName}/${task.workDir.fileName}"
+            }
+        }
+        if (!taskId) {
+            taskId = stringValue(trace?.get('task_id'))
         }
         int attempt = integerValue(
-            environment['NF_SEQLAB_PROGRESS_ATTEMPT'] ?: trace?.get('attempt'),
+            trace?.get('attempt') ?: environment['NF_SEQLAB_PROGRESS_ATTEMPT'],
             task.failCount + 1,
         )
         return taskId && process
@@ -298,33 +462,38 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     }
 
     private void recordAndRender() {
-        writeAudit()
+        DashboardView view = runtime.dashboard(maximumActiveFiles)
+        writeAudit(view)
         if (capabilities.cursorAddressing && session?.statsObserver != null) {
-            renderProgress(session.statsObserver.quickStats)
+            renderProjectedProgress(session.statsObserver.quickStats, view)
         }
         else {
-            renderPlainIfChanged()
+            renderPlainIfChanged(view)
         }
     }
 
     private void renderPlainIfChanged() {
+        renderPlainIfChanged(runtime.dashboard(maximumActiveFiles))
+    }
+
+    private void renderPlainIfChanged(DashboardView view) {
         if (capabilities.mode == RenderMode.OFF) {
             return
         }
-        String output = dashboardRenderer.render(runtime.dashboard(maximumActiveFiles), capabilities, frame++)
+        String output = dashboardRenderer.render(view, capabilities, frame++)
         if (output && output != lastPlainFrame) {
             System.out.println(output)
             lastPlainFrame = output
         }
     }
 
-    private void writeAudit() {
+    private void writeAudit(DashboardView view) {
         if (auditWriter == null) {
             return
         }
         try {
             TerminalCapabilities json = new TerminalCapabilities(RenderMode.JSON, 120, false, false, false)
-            String payload = dashboardRenderer.render(runtime.dashboard(maximumActiveFiles), json, frame)
+            String payload = dashboardRenderer.render(view, json, frame)
             auditWriter.append((Map<String, ?>) new JsonSlurper().parseText(payload))
         }
         catch (Exception error) {
@@ -353,12 +522,23 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     private static String stringValue(Object value) {
         return value == null ? null : value.toString()
     }
+
+    private static boolean successful(TraceRecord trace) {
+        String status = stringValue(trace?.get('status'))?.toUpperCase(Locale.ROOT)
+        return status in ['COMPLETED', 'SUCCEEDED']
+    }
+
+    private static String failureMessage(TraceRecord trace) {
+        String status = stringValue(trace?.get('status')) ?: 'failed'
+        String exit = stringValue(trace?.get('exit'))
+        return exit ? "Nextflow task ${status} (exit ${exit})" : "Nextflow task ${status}"
+    }
 }
 
 class TrackedTask {
     final TaskIdentity identity
     final Path snapshotPath
-    java.time.Instant updatedAt
+    ProgressSnapshot snapshot
 
     TrackedTask(TaskIdentity identity, Path snapshotPath) {
         this.identity = identity

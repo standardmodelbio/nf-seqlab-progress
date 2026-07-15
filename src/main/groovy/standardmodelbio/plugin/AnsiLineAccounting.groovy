@@ -2,7 +2,10 @@ package standardmodelbio.plugin
 
 import groovy.transform.CompileStatic
 import nextflow.trace.AnsiLogObserver
+import org.fusesource.jansi.Ansi
+import standardmodelbio.plugin.render.TerminalCells
 
+import java.io.PrintStream
 import java.lang.reflect.Field
 
 @CompileStatic
@@ -27,6 +30,26 @@ class AnsiLineAccounting {
 
     static void addPrintedLines(AnsiLogObserver observer, int additionalLines) {
         setPrintedLines(observer, getPrintedLines(observer) + additionalLines)
+    }
+
+    static int visibleLines(String block) {
+        return block ? block.count('\n') + 1 : 0
+    }
+
+    static int physicalLines(String block, int columns) {
+        return TerminalCells.physicalRows(block, columns)
+    }
+
+    static void eraseOwnedLines(PrintStream output, int lines) {
+        if (lines <= 0) {
+            return
+        }
+        Ansi control = Ansi.ansi().eraseLine(Ansi.Erase.ALL)
+        for (int index = 1; index < lines; index++) {
+            control.cursorUp(1).eraseLine(Ansi.Erase.ALL)
+        }
+        output.print(control.a('\r'))
+        output.flush()
     }
 
     static int getTerminalColumns(AnsiLogObserver observer, int fallback) {

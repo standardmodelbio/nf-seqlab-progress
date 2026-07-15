@@ -13,3 +13,4 @@ validation/*-results/
 validation/*-work/
 validation/results/
 validation/work/
+validation/.verification/

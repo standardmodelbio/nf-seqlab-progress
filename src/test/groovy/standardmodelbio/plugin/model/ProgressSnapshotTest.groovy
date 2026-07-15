@@ -38,6 +38,7 @@ class ProgressSnapshotTest extends Specification {
         'file_id'   | ''
         'attempt'   | 0
         'state'     | 'maybe'
+        'phase'     | ''
         'completed' | -1
         'total'     | 0
         'percent'   | Double.NaN
@@ -78,4 +79,3 @@ class ProgressSnapshotTest extends Specification {
         ]
     }
 }
-

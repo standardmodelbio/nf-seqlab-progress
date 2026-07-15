@@ -51,25 +51,36 @@ workflow {
 
     registerProgressStages(
         [
-            [id: 'build_svar2', label: 'Build SVAR2'],
-            [id: 'build_gvl', label: 'Build GVL'],
+            [id: 'build_svar2', label: 'Build SVAR2', file_ids: ['chr1', 'chr22']],
+            [id: 'build_gvl', label: 'Build GVL', file_ids: ['chr22']],
         ],
         [
             [process: 'SEQLAB_BUILD_SVAR2', stage: 'build_svar2', completion_boundary: true],
+            [process: 'SEQLAB_NORMALIZE', stage: 'build_gvl', completion_boundary: 'parent'],
             [process: 'SEQLAB_BUILD_GVL', stage: 'build_gvl', completion_boundary: true],
         ],
     )
 }
 ```
 
-Tasks provide stable identity through environment inputs:
+Normal nf-seqlab modules participate automatically when their `TaskRun`
+context contains a `meta` map. File identity resolves from
+`meta.file_id ?: meta.id`, and parent identity resolves from
+`meta.parent_file_id ?: meta.parent_id ?: fileId`. Optional managed environment
+inputs remain authoritative when a process provides them directly.
+
+Native snapshot producers export managed values inside their scripts. These
+shell-local exports are consumed by the producer, while the observer derives
+the same task ID from the Nextflow work directory:
 
 ```nextflow
-input:
-env 'NF_SEQLAB_PROGRESS_FILE_ID'
-env 'NF_SEQLAB_PROGRESS_PARENT_FILE_ID'
-env 'NF_SEQLAB_PROGRESS_TASK_ID'
-env 'NF_SEQLAB_PROGRESS_ATTEMPT'
+script:
+"""
+export NF_SEQLAB_PROGRESS_FILE_ID="${meta.file_id}"
+export NF_SEQLAB_PROGRESS_PARENT_FILE_ID="${meta.parent_file_id ?: meta.file_id}"
+export NF_SEQLAB_PROGRESS_TASK_ID="\$(basename "\$(dirname "\$PWD")")/\$(basename "\$PWD")"
+export NF_SEQLAB_PROGRESS_ATTEMPT="${task.attempt}"
+"""
 ```
 
 Native tools atomically replace `.nf-seqlab-progress.json` in the task work
@@ -83,7 +94,7 @@ directory. A valid snapshot uses the versioned protocol:
   "process": "SEQLAB_BUILD_SVAR2",
   "file_id": "chr22",
   "parent_file_id": "chr22",
-  "task_id": "task-22",
+  "task_id": "ed/89cec8...",
   "attempt": 1,
   "state": "running",
   "phase": "read",
@@ -96,17 +107,30 @@ directory. A valid snapshot uses the versioned protocol:
 }
 ```
 
-Stage percentages are based on completed source files. A source file counts
+Within one nonblank `phase`, counters may not regress and the denominator and
+unit may not change. The first snapshot for a new phase may reset all three, allowing transitions
+such as `80/100 records` in phase A to `0/4 chunks` in phase B. Once a task has
+advanced, snapshots from an earlier observed phase are stale and ignored.
+Snapshot states may be terminal, but only the corresponding Nextflow lifecycle
+completion or cache event marks a source file complete for stage accounting.
+
+Stage percentages are based on completed source files. When a stage declares
+`file_ids`, only that subset contributes to its expected and completed counts;
+omitting `file_ids` retains the full registered input set. A source file counts
 only when its configured completion-boundary task succeeds or is restored from
-cache. Partial byte, record, region, and chunk progress is shown only on the
-active file row and never inflates the completed-file count.
+cache. `completion_boundary: 'parent'` counts unsharded work where
+`file_id == parent_file_id`, while `true` always counts and `false` never does.
+Partial byte, record, region, and chunk progress is shown only on the active
+file row and never inflates the completed-file count. Concurrent snapshots with
+different phases or units render as indeterminate rather than being summed.
 
 ## Display Modes
 
 `params.progress_mode` accepts:
 
 - `auto` (default): full, compact, minimal, or plain based on the environment;
-- `full`, `compact`, or `minimal`: force an animated layout;
+- `full`, `compact`, or `minimal`: request an animated layout, with a safe
+  downgrade to plain output when the console is noninteractive;
 - `plain`: immutable, ANSI-free status lines;
 - `json`: machine-readable dashboard snapshots;
 - `off`: disable console progress output.
@@ -117,9 +141,11 @@ follows Nextflow's live terminal-width measurement, including resized tmux and
 screen panes. `NO_COLOR`, `TERM=dumb`, redirected output, CI, and agent mode are
 handled without changing pipeline behavior.
 
-Every state transition is also appended as JSON Lines under
-`<outdir>/pipeline_info/progress.jsonl`. This audit stream is independent of
-terminal animation and is suitable for post-run inspection.
+Each dashboard snapshot emitted by the observer is appended as JSON Lines under
+`<outdir>/pipeline_info/progress.jsonl`. This is a history of dashboard views,
+not a complete task-event log: unchanged frames may be omitted and several
+lifecycle changes may be represented by one projection. The file is independent
+of terminal animation and is suitable for post-run status inspection.
 
 ## Development
 
@@ -137,8 +163,10 @@ nextflow run validation -ansi-log false -work-dir validation/work
 ```
 
 The plugin is compiled against Nextflow 25.10.4. CI executes the same plugin
-artifact on the supported 25.10 and 26.04 patch releases and runs unit tests on
-Linux, macOS, and Windows.
+artifact on the supported 25.10 and 26.04 patch releases, exercises failure,
+retry, cache, and plain/JSON/off paths on all supported versions, validates
+tmux and screen on the floor and latest versions, and runs unit tests on Linux,
+macOS, and Windows.
 
 ## License
 

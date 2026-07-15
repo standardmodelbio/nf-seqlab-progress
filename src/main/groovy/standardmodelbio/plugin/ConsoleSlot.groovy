@@ -15,7 +15,7 @@ class ConsoleSlot {
         return getter(session) != null && !setters(session).isEmpty()
     }
 
-    static Object get(Session session) {
+    static synchronized Object get(Session session) {
         Method method = getter(session)
         if (method == null) {
             return null
@@ -23,7 +23,7 @@ class ConsoleSlot {
         return method.invoke(session)
     }
 
-    static boolean set(Session session, Object observer) {
+    static synchronized boolean set(Session session, Object observer) {
         Method method = setters(session).find { Method candidate ->
             candidate.parameterTypes[0].isInstance(observer)
         }
@@ -32,6 +32,20 @@ class ConsoleSlot {
         }
         method.invoke(session, observer)
         return true
+    }
+
+    static synchronized boolean clearIfOwned(Session session, Object owner) {
+        if (!get(session)?.is(owner)) {
+            return false
+        }
+        Method method = setters(session).find { Method candidate ->
+            candidate.parameterTypes[0].isInstance(owner)
+        }
+        if (method == null) {
+            return false
+        }
+        method.invoke(session, [null] as Object[])
+        return get(session) == null
     }
 
     private static Method getter(Session session) {
@@ -46,4 +60,3 @@ class ConsoleSlot {
         }
     }
 }
-
