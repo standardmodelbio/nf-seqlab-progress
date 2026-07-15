@@ -19,7 +19,8 @@ class TerminalCapabilitiesTest extends Specification {
         true  | 59    | [TERM: 'xterm-256color']                 || RenderMode.MINIMAL
         false | 120   | [TERM: 'xterm-256color']                 || RenderMode.PLAIN
         true  | 120   | [TERM: 'dumb']                           || RenderMode.PLAIN
-        true  | 120   | [TERM: 'xterm-256color', CI: 'true']     || RenderMode.PLAIN
+        true  | 120   | [TERM: 'xterm-256color', CI: 'true']     || RenderMode.FULL
+        false | 120   | [TERM: 'xterm-256color', CI: 'true']     || RenderMode.PLAIN
         true  | 120   | [TERM: 'xterm-256color', NXF_AGENT_MODE: 'true'] || RenderMode.PLAIN
     }
 

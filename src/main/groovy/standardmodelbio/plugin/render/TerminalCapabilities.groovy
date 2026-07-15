@@ -25,7 +25,6 @@ class TerminalCapabilities {
         if (requested == 'auto') {
             boolean plain = !tty ||
                 environment['TERM'] == 'dumb' ||
-                truthy(environment['CI']) ||
                 truthy(environment['NXF_AGENT_MODE'])
             mode = plain
                 ? RenderMode.PLAIN
@@ -47,7 +46,6 @@ class TerminalCapabilities {
         }
         boolean nonInteractive = !tty ||
             environment['TERM'] == 'dumb' ||
-            truthy(environment['CI']) ||
             truthy(environment['NXF_AGENT_MODE'])
         if (mode in [RenderMode.FULL, RenderMode.COMPACT, RenderMode.MINIMAL] && nonInteractive) {
             mode = RenderMode.PLAIN
