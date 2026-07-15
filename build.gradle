@@ -5,13 +5,14 @@ plugins {
 version = '0.1.0'
 
 nextflowPlugin {
-    nextflowVersion = '25.10.0'
+    nextflowVersion = findProperty('nextflowVersion') ?: '25.10.4'
 
     provider = 'standardmodelbio'
     className = 'standardmodelbio.plugin.SeqlabProgressPlugin'
     extensionPoints = [
         'standardmodelbio.plugin.SeqlabProgressExtension',
-        'standardmodelbio.plugin.SeqlabProgressFactory'
+        'standardmodelbio.plugin.SeqlabProgressFactory',
+        'standardmodelbio.plugin.SeqlabProgressRestoreFactory'
     ]
 
 }

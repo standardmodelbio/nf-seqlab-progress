@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Test and assemble
+        shell: bash
+        run: ./gradlew test assemble
+
+  nextflow:
+    name: Nextflow compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Build one floor-compatible artifact
+        run: ./gradlew clean test assemble installPlugin
+      - name: Install Nextflow launcher and terminal tools
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo apt-get update
+          sudo apt-get install -y screen tmux
+      - name: Run lifecycle matrix on supported Nextflow versions
+        run: |
+          set -euo pipefail
+          for version in 25.10.4 26.04.4 26.04.6; do
+            NXF_VER="$version" ./nextflow -version | grep -F "version $version"
+            NEXTFLOW_BIN=./nextflow NXF_VER="$version" \
+              bash validation/verify-lifecycle.sh
+          done
+      - name: Validate tmux dashboard on floor and latest
+        run: |
+          set -euo pipefail
+          name=''
+          root=''
+          cleanup() {
+            test -z "$name" || tmux kill-session -t "$name" 2>/dev/null || true
+            test -z "$root" || rm -rf "$root"
+          }
+          trap cleanup EXIT
+          for version in 25.10.4 26.04.6; do
+            name="nf-seqlab-progress-${version//./-}-${RANDOM}"
+            root="$(mktemp -d)"
+            tmux new-session -d -x 80 -y 30 -s "$name" \
+              "cd '$PWD'; set +e; TERM=screen-256color NXF_VER='$version' ./nextflow run validation --outdir '$root/results' --progress_mode auto -ansi-log true -work-dir '$root/work'; rc=\$?; printf '%s\n' \"\$rc\" > '$root/status'; exec sleep 30"
+            for _ in $(seq 1 120); do
+              test -s "$root/status" && break
+              sleep 0.25
+            done
+            if ! test -s "$root/status"; then
+              echo "tmux run timed out on Nextflow $version" >&2
+              tmux capture-pane -p -t "$name" -S - >&2 || true
+              exit 1
+            fi
+            if ! test "$(cat "$root/status")" = 0; then
+              echo "tmux run failed on Nextflow $version with status $(cat "$root/status")" >&2
+              tmux capture-pane -p -t "$name" -S - >&2 || true
+              exit 1
+            fi
+            tmux capture-pane -p -t "$name" -S - > "$root/pane.txt"
+            echo "===== tmux capture: Nextflow $version ====="
+            cat "$root/pane.txt"
+            if ! test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1; then
+              echo "tmux expected exactly one nf-seqlab wordmark on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1; then
+              echo "tmux expected exactly one final stage row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! grep -Fq '1/1' "$root/pane.txt"; then
+              echo "tmux final file count is missing on Nextflow $version" >&2
+              exit 1
+            fi
+            if grep -Eq '(^|[[:space:]])0/1([[:space:]]|$)|[[:space:]](80|0)\.0%[[:space:]]+(phase-a|phase-b)' "$root/pane.txt"; then
+              echo "tmux retained a stale dashboard row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test -s "$root/results/pipeline_info/progress.jsonl"; then
+              echo "tmux JSONL audit is missing on Nextflow $version" >&2
+              exit 1
+            fi
+            tmux kill-session -t "$name"
+            if tmux has-session -t "$name" 2>/dev/null; then
+              echo "tmux session survived cleanup on Nextflow $version" >&2
+              exit 1
+            fi
+            name=''
+            rm -rf "$root"
+            root=''
+          done
+          trap - EXIT
+      - name: Validate screen dashboard on floor and latest
+        run: |
+          set -euo pipefail
+          name=''
+          root=''
+          cleanup() {
+            test -z "$name" || screen -S "$name" -X quit 2>/dev/null || true
+            test -z "$root" || rm -rf "$root"
+          }
+          trap cleanup EXIT
+          for version in 25.10.4 26.04.6; do
+            name="nf-seqlab-progress-${version//./-}-${RANDOM}"
+            root="$(mktemp -d)"
+            screen -L -Logfile "$root/screen.log" -dmS "$name" bash -lc \
+              "cd '$PWD'; set +e; TERM=screen NXF_VER='$version' ./nextflow run validation --outdir '$root/results' --progress_mode auto -ansi-log true -work-dir '$root/work'; rc=\$?; printf '%s\n' \"\$rc\" > '$root/status'; exec sleep 30"
+            for _ in $(seq 1 120); do
+              test -s "$root/status" && break
+              sleep 0.25
+            done
+            if ! test -s "$root/status"; then
+              echo "screen run timed out on Nextflow $version" >&2
+              test -f "$root/screen.log" && cat "$root/screen.log" >&2
+              exit 1
+            fi
+            if ! test "$(cat "$root/status")" = 0; then
+              echo "screen run failed on Nextflow $version with status $(cat "$root/status")" >&2
+              test -f "$root/screen.log" && cat "$root/screen.log" >&2
+              exit 1
+            fi
+            sleep 1
+            screen -S "$name" -p 0 -X hardcopy "$root/pane.txt"
+            echo "===== screen capture: Nextflow $version ====="
+            cat "$root/pane.txt"
+            if ! test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1; then
+              echo "screen expected exactly one nf-seqlab wordmark on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1; then
+              echo "screen expected exactly one final stage row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! grep -Fq '1/1' "$root/pane.txt"; then
+              echo "screen final file count is missing on Nextflow $version" >&2
+              exit 1
+            fi
+            if grep -Eq '(^|[[:space:]])0/1([[:space:]]|$)|[[:space:]](80|0)\.0%[[:space:]]+(phase-a|phase-b)' "$root/pane.txt"; then
+              echo "screen retained a stale dashboard row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test -s "$root/results/pipeline_info/progress.jsonl"; then
+              echo "screen JSONL audit is missing on Nextflow $version" >&2
+              exit 1
+            fi
+            screen -S "$name" -X quit
+            if screen -ls | grep -Fq ".$name"; then
+              echo "screen session survived cleanup on Nextflow $version" >&2
+              exit 1
+            fi
+            name=''
+            rm -rf "$root"
+            root=''
+          done
+          trap - EXIT

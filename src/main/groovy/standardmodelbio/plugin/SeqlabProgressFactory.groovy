@@ -18,19 +18,30 @@ package standardmodelbio.plugin
 
 import groovy.transform.CompileStatic
 import nextflow.Session
-import nextflow.trace.TraceObserver
-import nextflow.trace.TraceObserverFactory
+import nextflow.trace.TraceObserverFactoryV2
+import nextflow.trace.TraceObserverV2
+import org.pf4j.Extension
 
 /**
  * Implements a factory object required to create
  * the {@link SeqlabProgressObserver} instance.
  */
 @CompileStatic
-class SeqlabProgressFactory implements TraceObserverFactory {
+@Extension(ordinal = -1000)
+class SeqlabProgressFactory implements TraceObserverFactoryV2 {
 
     @Override
-    Collection<TraceObserver> create(Session session) {
-        return List.<TraceObserver>of(new SeqlabProgressObserver())
+    Collection<TraceObserverV2> create(Session session) {
+        ProgressRuntime runtime = ProgressRuntimes.getOrCreate(session)
+        if (session.ansiLog && ConsoleSlot.supported(session) && ConsoleSlot.get(session) == null) {
+            SeqlabProgressObserver observer = new SeqlabProgressObserver(runtime, true)
+            if (ConsoleSlot.set(session, observer)) {
+                DashboardClaims.put(session, observer)
+                session.ansiLog = false
+                return List.<TraceObserverV2>of(observer)
+            }
+        }
+        return List.<TraceObserverV2>of(new SeqlabProgressObserver(runtime, false))
     }
 
 }
