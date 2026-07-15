@@ -6,3 +6,10 @@
 # Ignore Gradle build output directory
 build
 work
+validation/*-pane.txt
+validation/*.log
+validation/*.typescript
+validation/*-results/
+validation/*-work/
+validation/results/
+validation/work/

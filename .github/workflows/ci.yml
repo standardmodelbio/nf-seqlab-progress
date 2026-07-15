@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Test and assemble
+        shell: bash
+        run: ./gradlew test assemble
+
+  nextflow:
+    name: Nextflow compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Build one floor-compatible artifact
+        run: ./gradlew clean test assemble installPlugin
+      - name: Install Nextflow launcher and terminal tools
+        run: |
+          curl -fsSL https://get.nextflow.io | bash
+          sudo apt-get update
+          sudo apt-get install -y screen tmux
+      - name: Run the same artifact on supported Nextflow versions
+        run: |
+          set -euo pipefail
+          for version in 25.10.4 26.04.4 26.04.6; do
+            rm -rf validation/work validation/results validation/plain.log
+            NXF_VER="$version" ./nextflow -version | grep -F "version $version"
+            NXF_VER="$version" ./nextflow run validation \
+              -ansi-log false \
+              -work-dir validation/work 2>&1 | tee validation/plain.log
+            grep -Fq 'files=1/1' validation/plain.log
+            grep -Fq 'stage_percent=100.0' validation/plain.log
+            test -s validation/results/pipeline_info/progress.jsonl
+          done
+      - name: Validate tmux dashboard and cleanup
+        run: |
+          set -euo pipefail
+          name="nf-seqlab-progress-${RANDOM}"
+          rm -rf validation/tmux-work validation/tmux-results validation/tmux-pane.txt
+          tmux new-session -d -x 80 -y 30 -s "$name" \
+            "cd '$PWD' && TERM=screen-256color NXF_VER=26.04.6 ./nextflow run validation --outdir validation/tmux-results --progress_mode auto -ansi-log true -work-dir validation/tmux-work; sleep 2"
+          for _ in $(seq 1 20); do
+            tmux capture-pane -p -t "$name" -S - > validation/tmux-pane.txt
+            grep -Fq 'nf-seqlab' validation/tmux-pane.txt && break
+            sleep 0.25
+          done
+          grep -Fq 'nf-seqlab' validation/tmux-pane.txt
+          grep -Eq '0/1|1/1' validation/tmux-pane.txt
+          tmux kill-session -t "$name" 2>/dev/null || true
+          ! tmux has-session -t "$name" 2>/dev/null
+      - name: Validate screen dashboard and cleanup
+        run: |
+          set -euo pipefail
+          name="nf-seqlab-progress-${RANDOM}"
+          rm -rf validation/screen-work validation/screen-results validation/screen.log
+          screen -L -Logfile validation/screen.log -dmS "$name" bash -lc \
+            "cd '$PWD' && TERM=screen NXF_VER=26.04.6 ./nextflow run validation --outdir validation/screen-results --progress_mode auto -ansi-log true -work-dir validation/screen-work; sleep 2"
+          for _ in $(seq 1 40); do
+            grep -Fq 'nf-seqlab' validation/screen.log 2>/dev/null && break
+            sleep 0.25
+          done
+          grep -Fq 'nf-seqlab' validation/screen.log
+          grep -Eq '0/1|1/1' validation/screen.log
+          screen -S "$name" -X quit 2>/dev/null || true
+          ! screen -ls | grep -Fq ".$name"

@@ -28,18 +28,42 @@ import nextflow.plugin.extension.PluginExtensionPoint
 @CompileStatic
 class SeqlabProgressExtension extends PluginExtensionPoint {
 
+    private ProgressRuntime runtime
+
     @Override
     protected void init(Session session) {
+        runtime = ProgressRuntimes.getOrCreate(session)
     }
 
-    /**
-     * Say hello to the given target.
-     *
-     * @param target
-     */
     @Function
-    void sayHello(String target) {
-        println "Hello, ${target}!"
+    void registerProgressInputs(Collection<Map<String, ?>> inputs) {
+        runtime.registerInputs(inputs)
+    }
+
+    @Function
+    void registerProgressStages(
+        Collection<Map<String, ?>> stages,
+        Collection<Map<String, ?>> processes
+    ) {
+        runtime.registerStages(stages, processes)
+    }
+
+    @Function
+    Map<String, Object> withProgressIdentity(Map<String, ?> metadata) {
+        Map<String, Object> enriched = new LinkedHashMap<>()
+        enriched.putAll((Map) metadata)
+        String fileId = (metadata['file_id'] ?: metadata['id'])?.toString()
+        if (!fileId) {
+            throw new IllegalArgumentException('Progress metadata requires id or file_id')
+        }
+        String parentFileId = (
+            metadata['parent_file_id'] ?:
+            metadata['parent_id'] ?:
+            fileId
+        ).toString()
+        enriched['file_id'] = fileId
+        enriched['parent_file_id'] = parentFileId
+        return enriched
     }
 
 }
