@@ -138,14 +138,27 @@ different phases or units render as indeterminate rather than being summed.
 `params.progress_refresh_seconds` controls native snapshot polling and
 `params.progress_max_active_files` limits active file rows. Automatic mode
 follows Nextflow's live terminal-width measurement, including resized tmux and
-screen panes. `NO_COLOR`, `TERM=dumb`, redirected output, CI, and agent mode are
-handled without changing pipeline behavior.
+screen panes. `NO_COLOR`, `TERM=dumb`, redirected output, non-TTY CI, and agent
+mode are handled without changing pipeline behavior. CI sessions with a real
+TTY retain the appropriate animated layout.
 
 Each dashboard snapshot emitted by the observer is appended as JSON Lines under
 `<outdir>/pipeline_info/progress.jsonl`. This is a history of dashboard views,
 not a complete task-event log: unchanged frames may be omitted and several
 lifecycle changes may be represented by one projection. The file is independent
 of terminal animation and is suitable for post-run status inspection.
+
+Local paths and `file://` outputs are appended directly. Cloud output URIs such
+as `s3://` and `gs://` are resolved through Nextflow's filesystem providers.
+Because object stores do not support safe append, the plugin appends to a local
+synchronized spool. A bounded single background worker coalesces updates and
+publishes at most once per one-second throttle window. Workflow completion
+waits for a final flush of the newest generation; the spool is removed only
+after that publication succeeds.
+
+Run names, stage labels, file IDs, phases, units, and other protocol text are
+sanitized before terminal-cell measurement and rendering. Tabs, CR/LF, ESC,
+and other C0/C1 controls become ordinary spaces without altering Unicode text.
 
 ## Development
 

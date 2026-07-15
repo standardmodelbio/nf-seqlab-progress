@@ -87,6 +87,10 @@ class DashboardRendererTest extends Specification {
         payload.stage.id == 'build_svar2'
         payload.stage.completed_files == 5
         payload.stage.expected_files == 22
+        payload.stages*.id == ['prepare', 'build_svar2', 'build_gvl']
+        payload.stages.first().state == 'completed'
+        payload.stages.first().completed_files == 22
+        payload.stages.first().expected_files == 22
         payload.active_files.first().percent == 35.5d
         !output.contains('\u001B')
         !output.contains('\r')
@@ -150,6 +154,81 @@ class DashboardRendererTest extends Specification {
         hasValidSurrogates(firstLine)
     }
 
+    @Unroll
+    def 'sanitizes terminal controls before measuring and rendering #mode'() {
+        given:
+        DashboardView injected = controlInjectedView()
+        int width = mode == RenderMode.FULL ? 100 : mode == RenderMode.COMPACT ? 70 : 48
+
+        when:
+        String output = renderer.render(injected, capabilities(mode, width, true), 0)
+
+        then:
+        output.readLines().every { String line -> !containsProtocolControl(line) }
+        !output.contains('\u001B')
+        mode == RenderMode.JSON || output.contains('分析')
+        if (mode in [RenderMode.FULL, RenderMode.COMPACT, RenderMode.MINIMAL]) {
+            assert output.readLines().every { String line -> TerminalCells.width(line) <= width }
+        }
+
+        where:
+        mode << [
+            RenderMode.FULL,
+            RenderMode.COMPACT,
+            RenderMode.MINIMAL,
+            RenderMode.PLAIN,
+            RenderMode.JSON,
+        ]
+    }
+
+    def 'JSON protocol values are sanitized rather than merely escaped'() {
+        when:
+        Map payload = new JsonSlurper().parseText(
+            renderer.render(controlInjectedView(), capabilities(RenderMode.JSON, 120, false), 0)
+        ) as Map
+
+        then:
+        payload.run_id == 'run id [2J分析'
+        payload.run_name == 'AoU name next 😀'
+        payload.stage.id == 'stage id'
+        payload.stage.label == 'Build label [31mred 分析'
+        payload.active_files.first().file_id == 'chr22 bad [H分析'
+        payload.active_files.first().phase == 'read  phase'
+        payload.active_files.first().unit == 'rec ords'
+        [
+            payload.run_id,
+            payload.run_name,
+            payload.stage.id,
+            payload.stage.label,
+            payload.stage.state,
+            payload.stages.first().id,
+            payload.stages.first().label,
+            payload.stages.first().state,
+            payload.active_files.first().file_id,
+            payload.active_files.first().phase,
+            payload.active_files.first().state,
+            payload.active_files.first().unit,
+        ].every { String value -> !containsProtocolControl(value) }
+    }
+
+    def 'message sanitizer removes C0 and C1 controls without corrupting Unicode'() {
+        expect:
+        ProtocolText.sanitize('读取\tmessage\r\n\u001B[31m\u0085😀') ==
+            '读取 message   [31m 😀'
+    }
+
+    def 'message sanitizer replaces lone surrogates and preserves valid pairs'() {
+        given:
+        String sanitized = ProtocolText.sanitize('a\uD83Db\uDE00c\uD83D\uDE00d')
+
+        expect:
+        sanitized == 'a\uFFFDb\uFFFDc\uD83D\uDE00d'
+        hasValidSurrogates(sanitized)
+        TerminalCells.width(sanitized) == 8
+        TerminalCells.truncate(sanitized, 6) == 'a\uFFFDb\uFFFDc'
+        TerminalCells.physicalRows(sanitized, 4) == 2
+    }
+
     private static DashboardView view() {
         return new DashboardView(
             'aou-v8',
@@ -192,6 +271,43 @@ class DashboardRendererTest extends Specification {
             )],
             0,
         )
+    }
+
+    private static DashboardView controlInjectedView() {
+        return new DashboardView(
+            'run\tid\u001B[2J分析',
+            'AoU\rname\nnext\u0085😀',
+            [new StageDisplay(
+                'stage\nid',
+                'Build\tlabel\u001B[31mred\u007F分析',
+                'run\u0000ning',
+                1,
+                2,
+                50d,
+            )],
+            'stage\nid',
+            [new FileDisplay(
+                'chr22\nbad\u001B[H分析',
+                'read\r\nphase',
+                'run\u009Bning',
+                1L,
+                2L,
+                'rec\tords',
+                50d,
+            )],
+            0,
+        )
+    }
+
+    private static boolean containsProtocolControl(String value) {
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset)
+            if (codePoint <= 0x1F || codePoint in 0x7F..0x9F) {
+                return true
+            }
+            offset += Character.charCount(codePoint)
+        }
+        return false
     }
 
     private static int expectedCellWidth(String value) {

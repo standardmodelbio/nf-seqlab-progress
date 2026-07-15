@@ -7,17 +7,18 @@ import groovy.transform.CompileStatic
 class DashboardRenderer {
 
     String render(DashboardView view, TerminalCapabilities capabilities, long frame) {
+        DashboardView safeView = ProtocolText.sanitize(view)
         switch (capabilities.mode) {
             case RenderMode.FULL:
-                return renderFull(view, capabilities, frame)
+                return renderFull(safeView, capabilities, frame)
             case RenderMode.COMPACT:
-                return renderCompact(view, capabilities, frame)
+                return renderCompact(safeView, capabilities, frame)
             case RenderMode.MINIMAL:
-                return renderMinimal(view, capabilities, frame)
+                return renderMinimal(safeView, capabilities, frame)
             case RenderMode.PLAIN:
-                return renderPlain(view)
+                return renderPlain(safeView)
             case RenderMode.JSON:
-                return renderJson(view)
+                return renderJson(safeView)
             case RenderMode.OFF:
                 return ''
             default:
@@ -124,6 +125,16 @@ class DashboardRenderer {
                 expected_files: stage.expectedFiles,
                 percent: stage.percent,
             ],
+            stages: view.stages.collect { StageDisplay entry ->
+                [
+                    id: entry.id,
+                    label: entry.label,
+                    state: entry.state,
+                    completed_files: entry.completedFiles,
+                    expected_files: entry.expectedFiles,
+                    percent: entry.percent,
+                ]
+            },
             active_files: view.activeFiles.collect { FileDisplay file ->
                 [
                     file_id: file.fileId,

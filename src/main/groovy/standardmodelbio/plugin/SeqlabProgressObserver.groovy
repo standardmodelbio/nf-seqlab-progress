@@ -9,6 +9,7 @@ import nextflow.trace.TraceRecord
 import nextflow.trace.WorkflowStats
 import nextflow.trace.event.TaskEvent
 import org.fusesource.jansi.AnsiConsole
+import standardmodelbio.plugin.io.AuditPathResolver
 import standardmodelbio.plugin.io.ProgressAuditWriter
 import standardmodelbio.plugin.io.ProgressSnapshotReader
 import standardmodelbio.plugin.model.ProgressSnapshot
@@ -31,6 +32,7 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     private final ProgressRuntime runtime
     private final boolean ansiClaimed
     private final ProgressSnapshotReader snapshotReader = new ProgressSnapshotReader()
+    private final AuditPathResolver auditPathResolver = new AuditPathResolver()
     private final DashboardRenderer dashboardRenderer = new DashboardRenderer()
     private final Map<String, TrackedTask> activeTasks = new ConcurrentHashMap<>()
     private final Set<String> warnedSnapshots = ConcurrentHashMap.newKeySet()
@@ -112,7 +114,7 @@ class SeqlabProgressObserver extends AnsiLogObserver {
             capabilities = new TerminalCapabilities(RenderMode.PLAIN, width, false, terminalUnicode, false)
         }
 
-        Path auditRoot = resolveAuditRoot(params['outdir'], session.outputDir)
+        Path auditRoot = auditPathResolver.resolve(params['outdir'], session.outputDir)
         if (auditRoot != null) {
             try {
                 auditWriter = new ProgressAuditWriter(
@@ -144,14 +146,6 @@ class SeqlabProgressObserver extends AnsiLogObserver {
             refreshMillis,
             TimeUnit.MILLISECONDS,
         )
-    }
-
-    private static Path resolveAuditRoot(Object configuredOutdir, Path fallback) {
-        if (configuredOutdir instanceof Path) {
-            return configuredOutdir as Path
-        }
-        String value = configuredOutdir?.toString()?.trim()
-        return value ? Path.of(value) : fallback
     }
 
     @Override
