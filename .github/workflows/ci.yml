@@ -71,16 +71,39 @@ jobs:
               test -s "$root/status" && break
               sleep 0.25
             done
-            test "$(cat "$root/status")" = 0
+            if ! test -s "$root/status"; then
+              echo "tmux run timed out on Nextflow $version" >&2
+              tmux capture-pane -p -t "$name" -S - >&2 || true
+              exit 1
+            fi
+            if ! test "$(cat "$root/status")" = 0; then
+              echo "tmux run failed on Nextflow $version with status $(cat "$root/status")" >&2
+              tmux capture-pane -p -t "$name" -S - >&2 || true
+              exit 1
+            fi
             tmux capture-pane -p -t "$name" -S - > "$root/pane.txt"
-            test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1
-            test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1
-            grep -Fq '1/1' "$root/pane.txt"
+            echo "===== tmux capture: Nextflow $version ====="
+            cat "$root/pane.txt"
+            if ! test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1; then
+              echo "tmux expected exactly one nf-seqlab wordmark on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1; then
+              echo "tmux expected exactly one final stage row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! grep -Fq '1/1' "$root/pane.txt"; then
+              echo "tmux final file count is missing on Nextflow $version" >&2
+              exit 1
+            fi
             if grep -Eq '(^|[[:space:]])0/1([[:space:]]|$)|[[:space:]](80|0)\.0%[[:space:]]+(phase-a|phase-b)' "$root/pane.txt"; then
               echo "tmux retained a stale dashboard row on Nextflow $version" >&2
               exit 1
             fi
-            test -s "$root/results/pipeline_info/progress.jsonl"
+            if ! test -s "$root/results/pipeline_info/progress.jsonl"; then
+              echo "tmux JSONL audit is missing on Nextflow $version" >&2
+              exit 1
+            fi
             tmux kill-session -t "$name"
             if tmux has-session -t "$name" 2>/dev/null; then
               echo "tmux session survived cleanup on Nextflow $version" >&2
@@ -110,17 +133,40 @@ jobs:
               test -s "$root/status" && break
               sleep 0.25
             done
-            test "$(cat "$root/status")" = 0
+            if ! test -s "$root/status"; then
+              echo "screen run timed out on Nextflow $version" >&2
+              test -f "$root/screen.log" && cat "$root/screen.log" >&2
+              exit 1
+            fi
+            if ! test "$(cat "$root/status")" = 0; then
+              echo "screen run failed on Nextflow $version with status $(cat "$root/status")" >&2
+              test -f "$root/screen.log" && cat "$root/screen.log" >&2
+              exit 1
+            fi
             sleep 1
             screen -S "$name" -p 0 -X hardcopy "$root/pane.txt"
-            test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1
-            test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1
-            grep -Fq '1/1' "$root/pane.txt"
+            echo "===== screen capture: Nextflow $version ====="
+            cat "$root/pane.txt"
+            if ! test "$(grep -Fc 'nf-seqlab' "$root/pane.txt")" = 1; then
+              echo "screen expected exactly one nf-seqlab wordmark on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! test "$(grep -Fc 'Exact progress' "$root/pane.txt")" = 1; then
+              echo "screen expected exactly one final stage row on Nextflow $version" >&2
+              exit 1
+            fi
+            if ! grep -Fq '1/1' "$root/pane.txt"; then
+              echo "screen final file count is missing on Nextflow $version" >&2
+              exit 1
+            fi
             if grep -Eq '(^|[[:space:]])0/1([[:space:]]|$)|[[:space:]](80|0)\.0%[[:space:]]+(phase-a|phase-b)' "$root/pane.txt"; then
               echo "screen retained a stale dashboard row on Nextflow $version" >&2
               exit 1
             fi
-            test -s "$root/results/pipeline_info/progress.jsonl"
+            if ! test -s "$root/results/pipeline_info/progress.jsonl"; then
+              echo "screen JSONL audit is missing on Nextflow $version" >&2
+              exit 1
+            fi
             screen -S "$name" -X quit
             if screen -ls | grep -Fq ".$name"; then
               echo "screen session survived cleanup on Nextflow $version" >&2
