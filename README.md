@@ -183,6 +183,15 @@ retry, cache, and plain/JSON/off paths on all supported versions, validates
 tmux and screen on the floor and latest versions, and runs unit tests on Linux,
 macOS, and Windows.
 
+## Registry Publication
+
+The plugin is published under the `standardmodelbio` provider in the Nextflow
+Plugin Registry. After the one-time ownership claim is approved, maintainers
+store a registry access token in the `NPR_API_KEY` GitHub Actions secret and
+manually run the **Publish plugin** workflow from `main`. The workflow tests and
+assembles the plugin with Java 21 before `releasePlugin` uploads the current
+version. Registry credentials must never be committed or printed in logs.
+
 ## License
 
 Apache License 2.0. See [`COPYING`](COPYING).
