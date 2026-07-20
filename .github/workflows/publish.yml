@@ -1,0 +1,35 @@
+name: Publish plugin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-nextflow-plugin
+  cancel-in-progress: false
+
+jobs:
+  registry:
+    name: Nextflow Registry
+    if: github.repository == 'standardmodelbio/nf-seqlab-progress' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Test and assemble
+        run: ./gradlew clean test assemble
+      - name: Publish to the Nextflow Registry
+        env:
+          NPR_API_KEY: ${{ secrets.NPR_API_KEY }}
+        run: |
+          if [[ -z "${NPR_API_KEY:-}" ]]; then
+            echo "NPR_API_KEY is not configured for this repository." >&2
+            exit 1
+          fi
+          ./gradlew releasePlugin
