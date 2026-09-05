@@ -7,6 +7,7 @@ import nextflow.processor.TaskContext
 import nextflow.processor.TaskRun
 import nextflow.trace.TraceObserverV2
 import nextflow.trace.TraceRecord
+import nextflow.trace.event.FilePublishEvent
 import nextflow.trace.event.TaskEvent
 import spock.lang.Specification
 import spock.lang.TempDir
@@ -14,6 +15,10 @@ import standardmodelbio.plugin.render.DashboardView
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class SeqlabProgressObserverTest extends Specification {
 
@@ -404,6 +409,77 @@ class SeqlabProgressObserverTest extends Specification {
 
         cleanup:
         countingObserver?.onFlowComplete()
+    }
+
+    def 'published files are counted with their byte size, directories included'() {
+        given:
+        Path source = workDir.resolve('x.gvl')
+        Files.createDirectories(source.resolve('genotypes'))
+        Files.write(source.resolve('metadata.json'), new byte[100])
+        Files.write(source.resolve('genotypes').resolve('ranges.npy'), new byte[4096])
+        Path target = workDir.resolve('published').resolve('x.gvl')
+
+        when:
+        observer.onFilePublish(new FilePublishEvent(source, target))
+
+        then:
+        runtime.state.publishedFiles() == 1
+        runtime.state.publishedBytes() == 4196L
+        runtime.state.lastPublishTarget() == target.toString()
+    }
+
+    def 'in-flight publishes are read from the session publish executor'() {
+        given:
+        def session = Mock(Session)
+        def executor = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>())
+        def release = new CountDownLatch(1)
+        executor.submit({ release.await() } as Runnable)   // active
+        executor.submit({ } as Runnable)                   // queued
+        session.publishDirExecutorService() >> executor
+        observer.@session = session
+
+        expect:
+        observer.publishInFlight() == 2
+
+        when:
+        release.countDown()
+        executor.shutdown()
+        executor.awaitTermination(5, TimeUnit.SECONDS)
+
+        then:
+        observer.publishInFlight() == 0
+    }
+
+    def 'in-flight publishes are unknown without a session'() {
+        expect:
+        observer.publishInFlight() == -1
+    }
+
+    def 'a completion the state rejects is logged and counted instead of escaping'() {
+        given:
+        def task = new TaskRun()
+        task.name = 'SEQLAB_BUILD_SVAR2 (chr99)'
+        task.inputEnv = [
+            NF_SEQLAB_PROGRESS_FILE_ID: 'chr99',            // never registered as a source
+            NF_SEQLAB_PROGRESS_PARENT_FILE_ID: 'chr99',
+            NF_SEQLAB_PROGRESS_TASK_ID: 'orphan-1',
+        ]
+        task.workDir = workDir
+        def handler = Mock(TaskHandler)
+        handler.getTask() >> task
+        def trace = new TraceRecord()
+        trace.put('process', 'SEQLAB_BUILD_SVAR2')
+        trace.put('status', 'COMPLETED')
+        trace.put('attempt', 1)
+        def event = new TaskEvent(handler, trace)
+
+        when:
+        observer.onTaskComplete(event)
+
+        then:
+        noExceptionThrown()
+        observer.eventFailures == 1
+        runtime.state.stage('build_svar2').completedFiles == 0
     }
 
     private static ProgressRuntime configuredRuntime() {

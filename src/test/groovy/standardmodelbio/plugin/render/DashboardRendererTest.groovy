@@ -229,6 +229,50 @@ class DashboardRendererTest extends Specification {
         TerminalCells.physicalRows(sanitized, 4) == 2
     }
 
+    def 'full layout shows publish drain: in-flight count, completed files and bytes'() {
+        given:
+        def publishing = view().withPublish(new PublishDisplay(3, 12L * 1024 * 1024 * 1024, 1, 'aou-v9.chr21.gvl', 95L))
+
+        when:
+        String output = renderer.render(publishing, capabilities(RenderMode.FULL, 120, true), 0)
+
+        then:
+        output.contains('Publishing')
+        output.contains('1 in flight')
+        output.contains('3 done')
+        output.contains('12.0 GiB')
+        output.contains('aou-v9.chr21.gvl')
+        output.contains('1m 35s')
+        output.readLines().every { it.size() <= 120 }
+    }
+
+    def 'publish line is omitted when nothing has been published or is in flight'() {
+        when:
+        String output = renderer.render(view(), capabilities(RenderMode.FULL, 120, true), 0)
+
+        then:
+        !output.contains('Publishing')
+    }
+
+    def 'plain and json modes expose publish counters without a clock that would spam the log'() {
+        given:
+        def publishing = view().withPublish(new PublishDisplay(2, 2048L, -1, 'x.slhap', 7L))
+
+        when:
+        String plain = renderer.render(publishing, capabilities(RenderMode.PLAIN, 120, false), 0)
+        Map json = new JsonSlurper().parseText(renderer.render(publishing, capabilities(RenderMode.JSON, 120, false), 0)) as Map
+
+        then:
+        plain.contains('publish_done=2')
+        plain.contains('publish_bytes=2048')
+        plain.contains('publish_in_flight=unknown')
+        !plain.contains('7s')
+        json.publish.completed_files == 2
+        json.publish.completed_bytes == 2048
+        json.publish.in_flight == null
+        json.publish.last_target == 'x.slhap'
+    }
+
     private static DashboardView view() {
         return new DashboardView(
             'aou-v8',

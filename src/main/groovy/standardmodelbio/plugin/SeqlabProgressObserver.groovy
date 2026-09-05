@@ -7,6 +7,7 @@ import nextflow.processor.TaskRun
 import nextflow.trace.AnsiLogObserver
 import nextflow.trace.TraceRecord
 import nextflow.trace.WorkflowStats
+import nextflow.trace.event.FilePublishEvent
 import nextflow.trace.event.TaskEvent
 import org.fusesource.jansi.AnsiConsole
 import standardmodelbio.plugin.io.AuditPathResolver
@@ -20,10 +21,12 @@ import standardmodelbio.plugin.render.RenderMode
 import standardmodelbio.plugin.render.TerminalCapabilities
 
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 @Slf4j
@@ -58,6 +61,9 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     private int snapshotWarnings
     private int ownedDashboardLines
     private boolean closing
+    private int eventFailures
+    private long lastDrainRenderMillis
+    private static final long DRAIN_RENDER_INTERVAL_MILLIS = 5_000L
 
     SeqlabProgressObserver(ProgressRuntime runtime) {
         this(runtime, false, null)
@@ -85,6 +91,11 @@ class SeqlabProgressObserver extends AnsiLogObserver {
 
     int getSnapshotWarnings() {
         return snapshotWarnings
+    }
+
+    /** Task events the state refused to apply (logged, never propagated). */
+    int getEventFailures() {
+        return eventFailures
     }
 
     @Override
@@ -190,11 +201,13 @@ class SeqlabProgressObserver extends AnsiLogObserver {
                 return
             }
             pollTrackedSnapshot(identity)
-            if (successful(event.trace)) {
-                runtime.state.taskCompleted(identity, false)
-            }
-            else {
-                runtime.state.taskFailed(identity, failureMessage(event.trace))
+            applyEvent(identity, 'complete') {
+                if (successful(event.trace)) {
+                    runtime.state.taskCompleted(identity, false)
+                }
+                else {
+                    runtime.state.taskFailed(identity, failureMessage(event.trace))
+                }
             }
             removeActiveTask(identity)
             recordAndRender()
@@ -212,7 +225,9 @@ class SeqlabProgressObserver extends AnsiLogObserver {
                 return
             }
             pollTrackedSnapshot(identity)
-            runtime.state.taskCompleted(identity, true)
+            applyEvent(identity, 'cached') {
+                runtime.state.taskCompleted(identity, true)
+            }
             removeActiveTask(identity)
             recordAndRender()
         }
@@ -227,10 +242,83 @@ class SeqlabProgressObserver extends AnsiLogObserver {
             TaskIdentity identity = identity(event)
             if (identity != null) {
                 pollTrackedSnapshot(identity)
-                runtime.state.taskFailed(identity, failureMessage(event.trace))
+                applyEvent(identity, 'error') {
+                    runtime.state.taskFailed(identity, failureMessage(event.trace))
+                }
                 removeActiveTask(identity)
             }
             recordAndRender()
+        }
+    }
+
+    /**
+     * Nextflow reports a published output (one output path, possibly a whole
+     * directory) once its copy has finished; count it so the publish drain that
+     * follows the last task is visible instead of looking like a hung finalize.
+     */
+    @Override
+    void onFilePublish(FilePublishEvent event) {
+        synchronized (lifecycleLock) {
+            if (closing || event == null) {
+                return
+            }
+            if (capabilities.cursorAddressing) {
+                super.onFilePublish(event)
+            }
+            Path target = event.target ?: event.source
+            long bytes = sizeOf(event.source)
+            runtime.state.publishCompleted(target?.toString(), bytes, System.currentTimeMillis())
+            recordAndRender()
+        }
+    }
+
+    /**
+     * Publishes still active or queued on Nextflow's publish executor, or -1
+     * when the session does not expose a thread pool we can inspect.
+     */
+    int publishInFlight() {
+        try {
+            def executor = session?.publishDirExecutorService()
+            if (executor instanceof ThreadPoolExecutor) {
+                ThreadPoolExecutor pool = (ThreadPoolExecutor) executor
+                return pool.activeCount + pool.queue.size()
+            }
+        }
+        catch (Exception error) {
+            log.debug "nf-seqlab progress: cannot read publish executor state: ${error.message}"
+        }
+        return -1
+    }
+
+    private void applyEvent(TaskIdentity identity, String kind, Closure<?> action) {
+        try {
+            action.call()
+        }
+        catch (Exception error) {
+            eventFailures++
+            log.warn "nf-seqlab progress: ignoring ${kind} event for ${identity.process} " +
+                "(file=${identity.fileId} parent=${identity.parentFileId} task=${identity.taskId} " +
+                "attempt=${identity.attempt}): ${error.message}"
+        }
+    }
+
+    private static long sizeOf(Path source) {
+        if (source == null) {
+            return 0L
+        }
+        try {
+            if (Files.isDirectory(source)) {
+                long total = 0L
+                Files.walk(source).withCloseable { stream ->
+                    stream.filter { Path entry -> Files.isRegularFile(entry) }
+                        .forEach { Path entry -> total += Files.size(entry) }
+                }
+                return total
+            }
+            return Files.isRegularFile(source) ? Files.size(source) : 0L
+        }
+        catch (Exception ignored) {
+            return 0L
         }
     }
 
@@ -285,7 +373,12 @@ class SeqlabProgressObserver extends AnsiLogObserver {
         activeTasks.values().each { TrackedTask tracked ->
             changed |= pollTrackedSnapshot(tracked)
         }
+        long now = System.currentTimeMillis()
+        if (!changed && publishInFlight() > 0 && now - lastDrainRenderMillis >= DRAIN_RENDER_INTERVAL_MILLIS) {
+            changed = true
+        }
         if (changed) {
+            lastDrainRenderMillis = now
             recordAndRender()
         }
     }
@@ -346,7 +439,7 @@ class SeqlabProgressObserver extends AnsiLogObserver {
 
     @Override
     synchronized protected void renderProgress(WorkflowStats stats) {
-        renderProjectedProgress(stats, runtime.dashboard(maximumActiveFiles))
+        renderProjectedProgress(stats, dashboardView())
     }
 
     private synchronized void renderProjectedProgress(WorkflowStats stats, DashboardView view) {
@@ -455,8 +548,13 @@ class SeqlabProgressObserver extends AnsiLogObserver {
             : null
     }
 
-    private void recordAndRender() {
+    private DashboardView dashboardView() {
         DashboardView view = runtime.dashboard(maximumActiveFiles)
+        return view.withPublish(runtime.publishDisplay(publishInFlight(), System.currentTimeMillis()))
+    }
+
+    private void recordAndRender() {
+        DashboardView view = dashboardView()
         writeAudit(view)
         if (capabilities.cursorAddressing && session?.statsObserver != null) {
             renderProjectedProgress(session.statsObserver.quickStats, view)
@@ -467,7 +565,7 @@ class SeqlabProgressObserver extends AnsiLogObserver {
     }
 
     private void renderPlainIfChanged() {
-        renderPlainIfChanged(runtime.dashboard(maximumActiveFiles))
+        renderPlainIfChanged(dashboardView())
     }
 
     private void renderPlainIfChanged(DashboardView view) {

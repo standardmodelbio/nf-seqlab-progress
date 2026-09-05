@@ -418,4 +418,21 @@ class ProgressStateTest extends Specification {
             updated_at: '2026-07-15T03:18:00Z',
         ])
     }
+
+    def 'publish completions accumulate and project into the dashboard'() {
+        given:
+        def state = new ProgressState('publish-run')
+
+        when:
+        state.publishCompleted('out/seqlab/svar2/x.svar2', 7_000_000_000L, 1_000L)
+        state.publishCompleted('out/seqlab/gvl/x.gvl', 60_000_000_000L, 5_000L)
+
+        then:
+        state.publishedFiles() == 2
+        state.publishedBytes() == 67_000_000_000L
+        state.lastPublishTarget() == 'out/seqlab/gvl/x.gvl'
+        state.lastPublishAtMillis() == 5_000L
+        state.project(4).publishedFiles == 2
+        state.project(4).publishedBytes == 67_000_000_000L
+    }
 }
