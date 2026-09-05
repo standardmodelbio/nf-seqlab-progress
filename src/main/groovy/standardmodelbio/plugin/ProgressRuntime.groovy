@@ -5,6 +5,7 @@ import standardmodelbio.plugin.model.ProgressProjection
 import standardmodelbio.plugin.model.ProgressState
 import standardmodelbio.plugin.render.DashboardView
 import standardmodelbio.plugin.render.FileDisplay
+import standardmodelbio.plugin.render.PublishDisplay
 import standardmodelbio.plugin.render.StageDisplay
 
 @CompileStatic
@@ -93,6 +94,21 @@ class ProgressRuntime {
             files,
             projection.errorCount,
         )
+    }
+
+    /**
+     * Publish-drain summary to attach to a dashboard view, or null when nothing
+     * has been published and nothing is in flight. {@code publishInFlight} is
+     * the publish executor's active + queued count ({@code -1} when unknown).
+     */
+    PublishDisplay publishDisplay(int publishInFlight, long nowMillis) {
+        int completed = state.publishedFiles()
+        if (completed <= 0 && publishInFlight <= 0) {
+            return null
+        }
+        String lastTarget = state.lastPublishTarget()
+        Long age = lastTarget == null ? null : Math.max(0L, (nowMillis - state.lastPublishAtMillis()).intdiv(1000L)) as Long
+        return new PublishDisplay(completed, state.publishedBytes(), publishInFlight, lastTarget, age)
     }
 
     private static String required(Map<String, ?> source, String key) {

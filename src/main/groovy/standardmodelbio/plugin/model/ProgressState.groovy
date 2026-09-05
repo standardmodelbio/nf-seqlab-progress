@@ -272,6 +272,35 @@ class ProgressState {
             .collect { String parentFileId -> activeFile(stageId, parentFileId) }
     }
 
+    private int publishedFiles
+    private long publishedBytes
+    private String lastPublishTarget
+    private long lastPublishAtMillis
+
+    /** Record a completed publish (one Nextflow output path, possibly a directory). */
+    synchronized void publishCompleted(String target, long bytes, long atMillis) {
+        publishedFiles++
+        publishedBytes += Math.max(0L, bytes)
+        lastPublishTarget = target
+        lastPublishAtMillis = atMillis
+    }
+
+    synchronized int publishedFiles() {
+        return publishedFiles
+    }
+
+    synchronized long publishedBytes() {
+        return publishedBytes
+    }
+
+    synchronized String lastPublishTarget() {
+        return lastPublishTarget
+    }
+
+    synchronized long lastPublishAtMillis() {
+        return lastPublishAtMillis
+    }
+
     synchronized int errorCount() {
         return tasks.values().count { TaskRecord task -> task.state == 'failed' }.intValue()
     }
@@ -305,6 +334,10 @@ class ProgressState {
             current?.stageId,
             files,
             errorCount(),
+            publishedFiles,
+            publishedBytes,
+            lastPublishTarget,
+            lastPublishAtMillis,
         )
     }
 
@@ -419,6 +452,10 @@ class ProgressProjection {
     String currentStageId
     List<ActiveFileView> activeFiles
     int errorCount
+    int publishedFiles
+    long publishedBytes
+    String lastPublishTarget
+    long lastPublishAtMillis
 }
 
 @CompileStatic

@@ -49,6 +49,10 @@ class DashboardRenderer {
         for (int index = 0; index < fileRows; index++) {
             lines << fileLine(view.activeFiles[index], capabilities.width, capabilities.unicode, frame)
         }
+        String publishLine = publishLine(view.publish, true)
+        if (publishLine) {
+            lines << fit(publishLine, capabilities.width)
+        }
         if (view.errorCount > 0) {
             lines << fit("Errors: ${view.errorCount} (see task logs)", capabilities.width)
         }
@@ -70,6 +74,10 @@ class DashboardRenderer {
         if (!view.activeFiles.isEmpty()) {
             lines << fileLine(view.activeFiles.first(), capabilities.width, capabilities.unicode, frame)
         }
+        String publishLine = publishLine(view.publish, false)
+        if (publishLine) {
+            lines << fit(publishLine, capabilities.width)
+        }
         return lines.collect { String line -> fit(line, capabilities.width) }.join('\n')
     }
 
@@ -89,6 +97,10 @@ class DashboardRenderer {
             int idWidth = Math.max(4, capabilities.width - TerminalCells.width(progress) - 1)
             lines << fit("${middleElide(file.fileId, idWidth)} ${progress}", capabilities.width)
         }
+        String publishLine = publishLine(view.publish, false)
+        if (publishLine) {
+            lines << fit(publishLine, capabilities.width)
+        }
         return lines.join('\n')
     }
 
@@ -107,6 +119,11 @@ class DashboardRenderer {
             fields << "file=${token(file.fileId)}".toString()
             fields << "file_percent=${file.percent == null ? 'indeterminate' : oneDecimal(file.percent)}".toString()
             fields << "phase=${token(file.phase ?: 'running')}".toString()
+        }
+        if (view.publish?.visible) {
+            fields << "publish_in_flight=${view.publish.inFlight < 0 ? 'unknown' : view.publish.inFlight}".toString()
+            fields << "publish_done=${view.publish.completedFiles}".toString()
+            fields << "publish_bytes=${view.publish.completedBytes}".toString()
         }
         return fields.join(' ')
     }
@@ -147,8 +164,57 @@ class DashboardRenderer {
                 ]
             },
             error_count: view.errorCount,
+            publish: view.publish == null ? null : [
+                completed_files: view.publish.completedFiles,
+                completed_bytes: view.publish.completedBytes,
+                in_flight: view.publish.inFlight < 0 ? null : view.publish.inFlight,
+                last_target: view.publish.lastTarget,
+                last_age_seconds: view.publish.lastAgeSeconds,
+            ],
         ]
         return JsonOutput.toJson(payload)
+    }
+
+    /** One line describing the publish drain; empty when nothing was or is being published. */
+    static String publishLine(PublishDisplay publish, boolean detailed) {
+        if (publish == null || !publish.visible) {
+            return ''
+        }
+        List<String> parts = []
+        if (publish.inFlight > 0) {
+            parts << "${publish.inFlight} in flight".toString()
+        }
+        else if (publish.inFlight < 0) {
+            parts << 'in flight: unknown'
+        }
+        parts << "${publish.completedFiles} done (${humanBytes(publish.completedBytes)})".toString()
+        if (detailed && publish.lastTarget) {
+            String name = publish.lastTarget.tokenize('/').last()
+            String age = publish.lastAgeSeconds == null ? '' : " ${humanDuration(publish.lastAgeSeconds)} ago"
+            parts << "last: ${middleElide(name, 40)}${age}".toString()
+        }
+        return "${TerminalCells.padRight('Publishing', 18)} ${parts.join(' · ')}".toString()
+    }
+
+    static String humanBytes(long bytes) {
+        double value = bytes
+        for (String unit : ['B', 'KiB', 'MiB', 'GiB', 'TiB']) {
+            if (value < 1024d || unit == 'TiB') {
+                return unit == 'B' ? "${bytes} B".toString() : "${oneDecimal(value)} ${unit}".toString()
+            }
+            value /= 1024d
+        }
+        return "${bytes} B".toString()
+    }
+
+    static String humanDuration(long seconds) {
+        if (seconds < 60) {
+            return "${seconds}s".toString()
+        }
+        if (seconds < 3600) {
+            return "${(seconds / 60) as long}m ${seconds % 60}s".toString()
+        }
+        return "${(seconds / 3600) as long}h ${((seconds % 3600) / 60) as long}m".toString()
     }
 
     private static String stageStrip(List<StageDisplay> stages, boolean unicode) {

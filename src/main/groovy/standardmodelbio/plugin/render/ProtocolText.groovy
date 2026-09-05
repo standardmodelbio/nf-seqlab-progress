@@ -61,6 +61,13 @@ final class ProtocolText {
                 file.percent,
             )
         }
+        PublishDisplay publish = view.publish == null ? null : new PublishDisplay(
+            view.publish.completedFiles,
+            view.publish.completedBytes,
+            view.publish.inFlight,
+            sanitize(view.publish.lastTarget),
+            view.publish.lastAgeSeconds,
+        )
         return new DashboardView(
             sanitize(view.runId),
             sanitize(view.runName),
@@ -68,6 +75,7 @@ final class ProtocolText {
             sanitize(view.currentStageId),
             files,
             view.errorCount,
+            publish,
         )
     }
 

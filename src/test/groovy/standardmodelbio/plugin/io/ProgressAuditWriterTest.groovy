@@ -284,8 +284,11 @@ class ProgressAuditWriterTest extends Specification {
         error.message == 'Timed out after 150 ms while flushing progress audit'
         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt) < 2_000L
         operations.uploadInterrupted.await(1, TimeUnit.SECONDS)
-        Files.list(staging).withCloseable { it.count() } == 1
+        // close() returns as soon as the deadline passes; the interrupted worker
+        // deletes its upload snapshot in a finally block that may still be
+        // running. Wait for the publisher thread to exit before counting files.
         noPublisherThreads()
+        Files.list(staging).withCloseable { it.count() } == 1
 
         cleanup:
         operations?.releaseUploads?.countDown()

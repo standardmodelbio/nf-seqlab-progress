@@ -21,7 +21,7 @@ Pin the plugin in `nextflow.config`:
 
 ```groovy
 plugins {
-    id 'nf-seqlab-progress@0.1.0'
+    id 'nf-seqlab-progress@0.2.0'
 }
 ```
 
@@ -157,6 +157,21 @@ synchronized spool. A bounded single background worker coalesces updates and
 publishes at most once per one-second throttle window. Workflow completion
 waits for a final flush of the newest generation; the spool is removed only
 after that publication succeeds.
+
+Nextflow publishes outputs asynchronously after each task completes and only
+ends the run once that queue drains, so a slow copy (for example a 60 GB
+dataset through a FUSE mount) would otherwise look like a hung final stage:
+every process shows as complete, yet the run keeps going. The dashboard
+therefore renders a `Publishing` line whenever outputs have been or are being
+published — publishes still active or queued on Nextflow's publish executor
+("in flight"), completed publishes with their total size, and the most recent
+target with its age — and keeps redrawing during a drain so the clock moves.
+Plain and JSON snapshots carry the same counters (`publish_in_flight`,
+`publish_done`, `publish_bytes`; `publish.*`) without the age, so unchanged
+frames stay unchanged. A task event that the progress state refuses to apply
+(for example an unregistered file id) is logged at WARN with the task's
+identity and counted in `SeqlabProgressObserver.eventFailures` instead of
+escaping into Nextflow's observer dispatch and freezing that file's row.
 
 Run names, stage labels, file IDs, phases, units, and other protocol text are
 sanitized before terminal-cell measurement and rendering. Tabs, CR/LF, ESC,
