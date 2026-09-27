@@ -6,6 +6,60 @@ import standardmodelbio.plugin.model.TaskIdentity
 
 class ProgressRuntimeTest extends Specification {
 
+    def 'run id follows the work dir so it matches what tasks stamp'() {
+        // nf-seqlab tasks export
+        //   NF_SEQLAB_PROGRESS_RUN_ID=$(basename $(dirname $(dirname $PWD)))
+        // which is the work dir's own name. Matching on session.runName
+        // instead rejected every snapshot under a campaign launcher.
+        given:
+        def session = Mock(Session)
+        session.getRunName() >> 'nauseous_borg'
+        session.getWorkDir() >> java.nio.file.Paths.get('/home/u/work/nf-seqlab/aou_v9_pool_g0')
+
+        when:
+        def runtime = ProgressRuntimes.getOrCreate(session)
+
+        then:
+        runtime.runId == 'aou_v9_pool_g0'
+        runtime.runName == 'nauseous_borg'
+
+        cleanup:
+        ProgressRuntimes.remove(session)
+    }
+
+    def 'an explicit env override wins over the work dir'() {
+        given:
+        def session = Mock(Session)
+        session.getRunName() >> 'nauseous_borg'
+        session.getWorkDir() >> java.nio.file.Paths.get('/home/u/work/nf-seqlab/aou_v9_pool_g0')
+        session.getConfig() >> [env: [NF_SEQLAB_PROGRESS_RUN_ID: 'explicit_campaign']]
+
+        when:
+        def runtime = ProgressRuntimes.getOrCreate(session)
+
+        then:
+        runtime.runId == 'explicit_campaign'
+
+        cleanup:
+        ProgressRuntimes.remove(session)
+    }
+
+    def 'a snapshot stamped with the campaign is accepted, not discarded'() {
+        // the end-to-end property: the dashboard stayed at 0.0% for a whole
+        // run because this round trip threw.
+        given:
+        def session = Mock(Session)
+        session.getRunName() >> 'nauseous_borg'
+        session.getWorkDir() >> java.nio.file.Paths.get('/w/aou_v9_pool_g0')
+        def runtime = ProgressRuntimes.getOrCreate(session)
+
+        expect:
+        runtime.runId == 'aou_v9_pool_g0'
+
+        cleanup:
+        ProgressRuntimes.remove(session)
+    }
+
     def 'run name is the externally visible progress identifier'() {
         given:
         def session = Mock(Session)
